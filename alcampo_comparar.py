@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.7"
+VERSION = "1.8"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -502,8 +502,8 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
         out.append("  Envío de Alcampo NO incluido: aún no se conoce (indícalo con --envio-alcampo).")
     por_dif = sorted(r["filas"], key=lambda f: f["coste_con_promo"] - f["carrefour_lista"])
     def fila(f):
-        marca = f" [{f['alcampo']['marca']}]" if f["alcampo"].get("marca") else ""
-        return f"  {f['nombre'][:34]:34} x{f['cantidad']:<3} Carrefour {_eur(f['carrefour_lista']):>9}  Alcampo {_eur(f['coste_con_promo']):>9}  {f['alcampo']['nombre'][:34]}{marca}"
+        return (f"  {f['nombre'][:60]} x{f['cantidad']}: Carrefour {_eur(f['carrefour_lista'])} | Alcampo {_eur(f['coste_con_promo'])}\n"
+                f"     <- {f['alcampo']['nombre'][:80]} [{f['alcampo'].get('envase') or '?'}] a {_eur(f['alcampo']['precio'])} ({f['formato']})")
     alc = [fila(f) for f in por_dif if f["coste_con_promo"] < f["carrefour_lista"]][:8]
     car = [fila(f) for f in por_dif[::-1] if f["coste_con_promo"] > f["carrefour_lista"]][:8]
     out += ["", "Donde Alcampo sale MÁS barato:"] + (alc or ["  (ninguno)"])

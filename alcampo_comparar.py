@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.10"
+VERSION = "1.11"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -747,6 +747,17 @@ def cmd_diagnostico(a):
           f"vacías: {len(vacias)}; sin hacer: {sum(1 for q in qs if q not in res)}.")
     if vacias:
         print("Vacías (primeras 8): " + " | ".join(vacias[:8]))
+    cuenta, todos = {}, {}
+    for lista in res.values():
+        for c in lista:
+            todos[c["sku"]] = c
+    for c in todos.values():
+        for x in c.get("promos") or []:
+            k = (x.get("tipo"), x.get("descripcion"))
+            cuenta[k] = cuenta.get(k, 0) + 1
+    print(f"\nPromociones vistas en {len(todos)} productos de Alcampo: {sum(cuenta.values())} ({len(cuenta)} textos distintos). Los 15 más frecuentes:")
+    for (tipo, desc), n_ in sorted(cuenta.items(), key=lambda kv: -kv[1])[:15]:
+        print(f"  {n_:3} x [{tipo}] {desc}")
     n = 0
     for l in p.get("lineas") or []:
         if es_a_peso(l):

@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -658,14 +658,46 @@ def cmd_comparar(a):
     return 0
 
 
+def cmd_diagnostico(a):
+    """Informe corto para saber POR QUÉ no se empareja: búsquedas vacías, y candidatos que devolvió Alcampo para las líneas sin equivalente."""
+    h, _ = cargar_historial(a.historial)
+    p = elegir_pedido(h, a.pedido)
+    res, fich, _, _ = cargar_resultados(a.resultados)
+    qs = consultas_del_pedido(p)
+    vacias = [q for q in qs if q in res and not res[q]]
+    print(f"Ficheros: {len(fich)}. Búsquedas del pedido: {len(qs)}; con resultados: {sum(1 for q in qs if res.get(q))}; "
+          f"vacías: {len(vacias)}; sin hacer: {sum(1 for q in qs if q not in res)}.")
+    if vacias:
+        print("Vacías (primeras 8): " + " | ".join(vacias[:8]))
+    n = 0
+    for l in p.get("lineas") or []:
+        if es_a_peso(l):
+            continue
+        pool = {c["sku"]: c for q in consultas_de_linea(l["nombre"]) for c in res.get(q) or []}
+        if emparejar(l, list(pool.values())) is not None:
+            continue
+        n += 1
+        if n > a.lineas:
+            break
+        print(f"\n- {l['nombre']}\n  búsquedas: " + "; ".join(f"'{q}'={len(res.get(q) or [])}" for q in consultas_de_linea(l["nombre"])))
+        pf = _perfil(l["nombre"], "", l.get("venta"))
+        print(f"  tipo={pf['head']} atributos={sorted(pf['attrs'])} resto={sorted(pf['resto'])}")
+        for c in list(pool.values())[:3]:
+            print(f"    candidato: {c['nombre'][:50]} [{c['marca']}] disp={c['disponible']} precio={c['precio']}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Compara un pedido de Carrefour con los precios de Alcampo.")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for nombre, f in (("consultas", cmd_consultas), ("comparar", cmd_comparar)):
+    for nombre, f in (("consultas", cmd_consultas), ("comparar", cmd_comparar), ("diagnostico", cmd_diagnostico)):
         s = sub.add_parser(nombre)
         s.add_argument("--historial", help="ruta de historial_pedidos.json (por defecto lo busca solo)")
         s.add_argument("--pedido", help="id del pedido de Carrefour (por defecto, el más reciente con 20 líneas o más)")
-        if nombre == "consultas":
+        if nombre == "diagnostico":
+            s.add_argument("--resultados", default="alcampo_resultados.json")
+            s.add_argument("--lineas", type=int, default=8, help="cuántas líneas sin equivalente detallar")
+        elif nombre == "consultas":
             s.add_argument("--consultas", default="alcampo_consultas.json")
             s.add_argument("--script", default="alcampo_exportar_listo.js")
             s.add_argument("--faltan", action="store_true", help="solo las búsquedas que aún no están en alcampo_resultados*.json")

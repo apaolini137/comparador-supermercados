@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.11"
+VERSION = "1.12"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -361,7 +361,7 @@ def _marca_en_nombre(marca, nombre):
     return bool(mt) and all(m in nt for m in mt)
 
 
-_RE_2A = re.compile(r"2[ªaº]?\.?\s*(?:unidad|ud\.?)\s*(?:al\s*)?-?\s*(\d+)\s*%", re.I)
+_RE_2A = re.compile(r"2[ªaº]?\.?\s*(?:unidad|und|ud\.?)\s*(?:al\s*)?-?\s*(\d+)\s*%", re.I)
 
 
 _RE_NXM = re.compile(r"(?<![\d,.])([2-6])\s*x\s*([1-5])(?![\d,.]|\s*(?:g|kg|ml|l|cl)\b)", re.I)
@@ -373,6 +373,8 @@ def ahorro_promo(promos, precio, q):
     Devuelve (ahorro, descripción) o (0.0, None)."""
     for p in promos or []:
         d = str(p.get("descripcion") or "")
+        if re.search(r"club|tarjeta|acum", d, re.I):
+            continue                                   # descuento de cliente acumulado en tarjeta: no es precio de estantería
         m = _RE_2A.search(d)
         if m and q >= 2:
             return round((q // 2) * precio * int(m.group(1)) / 100, 2), d
@@ -485,6 +487,14 @@ def _eur(x):
     return f"{x:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _texto_promos(f):
+    """Promociones del producto de Alcampo elegido, y si se han aplicado al coste, para poder comprobarlo a ojo."""
+    ps = [str(x.get("descripcion") or "") for x in f["alcampo"].get("promos") or [] if x.get("descripcion")]
+    if not ps:
+        return ""
+    return "\n     promos de Alcampo: " + " | ".join(x[:55] for x in ps[:3]) + (f"  -> APLICADA: {f['promo_aplicada']}" if f.get("promo_aplicada") else " (ninguna aplicada)")
+
+
 def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
     t, n_fil, n_sin, n_peso = r["totales"], len(r["filas"]), len(r["sin_equivalente"]) + len(r["a_revisar"]), len(r["a_peso"])
     tt = pedido.get("totales") or {}
@@ -513,7 +523,8 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
     por_dif = sorted(r["filas"], key=lambda f: f["coste_con_promo"] - f["carrefour_lista"])
     def fila(f):
         return (f"  {f['nombre'][:60]} x{f['cantidad']}: Carrefour {_eur(f['carrefour_lista'])} | Alcampo {_eur(f['coste_con_promo'])}\n"
-                f"     <- {f['alcampo']['nombre'][:80]} [{f['alcampo'].get('envase') or '?'}] a {_eur(f['alcampo']['precio'])} ({f['formato']})")
+                f"     <- {f['alcampo']['nombre'][:80]} [{f['alcampo'].get('envase') or '?'}] a {_eur(f['alcampo']['precio'])} ({f['formato']})"
+                + _texto_promos(f))
     alc = [fila(f) for f in por_dif if f["coste_con_promo"] < f["carrefour_lista"]][:8]
     car = [fila(f) for f in por_dif[::-1] if f["coste_con_promo"] > f["carrefour_lista"]][:8]
     out += ["", "Donde Alcampo sale MÁS barato:"] + (alc or ["  (ninguno)"])

@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.16"
+VERSION = "1.17"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -97,7 +97,9 @@ _FORM_R = {_raiz(x) for x in _FORMATOS}
 
 
 _GEN_R = {_raiz(x) for x in ("especial", "tradicional", "clasico", "original", "suave", "fino", "premium", "calidad",
-                             "selecta", "seleccion", "mini", "maxi", "nuevo", "gran", "grande")}
+                             "selecta", "seleccion", "mini", "maxi", "nuevo", "gran", "grande",
+                             # formas de corte: dados, rodajas o troceado es el mismo producto para quien compra
+                             "dados", "rodajas", "troceado", "troceada", "trozos", "cortado", "cortada", "laminas", "tiras", "mitades")}
 
 
 _USOS_R = [{_raiz(x) for x in g} for g in (

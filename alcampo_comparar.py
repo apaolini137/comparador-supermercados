@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.4"
+VERSION = "1.5"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -318,6 +318,21 @@ def limpiar_nombre_alcampo(nombre):
     return " ".join(toks[i:] + [t for t in toks[:i] if _raiz(re.sub(r"[^\wáéíóúüñÁÉÍÓÚÜÑ]", "", t)) in _ATTR_R])
 
 
+_RE_UDS = re.compile(r"(\d+)\s*(?:unidades|uds?|rollos|huevos|compresas|bolsitas|sobres|pastillas|latas|botellas|briks|porciones|lonchas|"
+                     r"capsulas|tiritas|servilletas|panuelos|bolsas|toallitas|salvaslips|tampones|pa[nñ]ales|por envase)\b", re.I)
+
+
+def unidades(texto):
+    """Nº de unidades de un pack ('12 rollos', '40 por envase', 'docena', 'pack de 6', '6 x 1 l'), o None."""
+    t = _sin_acentos(texto).replace(",", ".")
+    if re.search(r"\bdocena\b", t):
+        return 12.0
+    if re.search(r"media docena", t):
+        return 6.0
+    m = _RE_UDS.search(t) or re.search(r"pack\s*(?:de\s*)?(\d+)\b", t) or re.search(r"\b(\d+)\s*x\s*\d+(?:\.\d+)?\s*(?:kg|gr|g|ml|cl|lt|l)\b", t)
+    return float(m.group(1)) if m else None
+
+
 def _marca_en_nombre(marca, nombre):
     mt = [_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", _sin_acentos(marca).lower()) if len(w) > 1]
     nt = {_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", _sin_acentos(nombre).lower())}
@@ -363,16 +378,20 @@ def emparejar(linea, productos):
         nivel = "estricta" if _parecido(o_sin, pc, True) else ("laxa" if _parecido(o_sin, pc, False) else None)
         if not nivel:
             continue
-        comparable = bool(tam_o and tam_c and 0.8 <= tam_c / tam_o <= 1.25)
+        n_o, n_c = unidades(linea["nombre"]), unidades(f"{c['nombre']} {c.get('envase') or ''}")
+        base_o, base_c, medida = (tam_o, tam_c, "tamaño") if tam_o and tam_c else ((n_o, n_c, "unidades") if n_o and n_c else (None, None, None))
+        comparable = bool(base_o and base_c and 0.8 <= base_c / base_o <= 1.25)
         misma_marca = _marca_en_nombre(c.get("marca", ""), linea["nombre"])
         pu = c.get("precio_unidad") or (c["precio"] / (tam_c / 1000) if tam_c else c["precio"])
-        mejores.append(((nivel != "estricta", not misma_marca, not comparable, pu), c, nivel, misma_marca, comparable, tam_c))
+        mejores.append(((nivel != "estricta", not misma_marca, not comparable, pu), c, nivel, misma_marca, comparable, base_o, base_c, medida))
     if not mejores:
         return None
-    _, c, nivel, misma_marca, comparable, tam_c = min(mejores, key=lambda x: x[0])
+    _, c, nivel, misma_marca, comparable, base_o, base_c, medida = min(mejores, key=lambda x: x[0])
     q, precio = linea["cantidad"], c["precio"]
-    if tam_o and tam_c and not comparable:
-        coste, formato = round(precio * (q * tam_o) / tam_c, 2), f"ajustado por tamaño ({c['envase']} frente a {_texto_tamano(linea['nombre']) or 'el original'})"
+    if base_o and base_c and not comparable:
+        coste = round(precio * (q * base_o) / base_c, 2)
+        formato = (f"ajustado por tamaño ({c['envase']} frente a {_texto_tamano(linea['nombre']) or 'el original'})" if medida == "tamaño"
+                   else f"ajustado por unidades ({base_c:g} frente a {base_o:g})")
     else:
         coste, formato = round(precio * q, 2), "mismo formato" if comparable else "tamaño sin comprobar"
     ahorro, texto_promo = ahorro_promo(c.get("promos"), precio, q) if comparable else (0.0, None)
@@ -393,7 +412,7 @@ def valor_lista(linea):
 
 def comparar_pedido(pedido, resultados):
     """resultados: {consulta: [productos de Alcampo]}. Devuelve el detalle por línea y los totales."""
-    filas, a_peso, sin_eq = [], [], []
+    filas, revisar, a_peso, sin_eq = [], [], [], []
     for l in pedido.get("lineas") or []:
         if es_a_peso(l):
             a_peso.append({"nombre": l["nombre"], "carrefour_lista": valor_lista(l)})
@@ -409,15 +428,17 @@ def comparar_pedido(pedido, resultados):
         if e is None:
             sin_eq.append({"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe")})
             continue
-        filas.append({"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe") or 0.0, **e})
+        fila = {"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe") or 0.0, **e}
+        # fiable = equivalencia estricta y formato comprobado; lo demás se lista aparte y no cuenta en los totales
+        (filas if e["nivel"] == "estricta" and e["formato"] != "tamaño sin comprobar" else revisar).append(fila)
     t_lista = round(sum(f["carrefour_lista"] for f in filas), 2)
     t_pag = round(sum(f["carrefour_pagado"] for f in filas), 2)
     t_alc = round(sum(f["coste"] for f in filas), 2)
     t_alc_p = round(sum(f["coste_con_promo"] for f in filas), 2)
-    v_sin = round(sum(s["carrefour_lista"] for s in sin_eq), 2)
+    v_sin = round(sum(s["carrefour_lista"] for s in sin_eq) + sum(f["carrefour_lista"] for f in revisar), 2)
     v_peso = round(sum(x["carrefour_lista"] for x in a_peso), 2)
     cobertura = t_lista / (t_lista + v_sin) if (t_lista + v_sin) else 0.0
-    return {"filas": filas, "sin_equivalente": sin_eq, "a_peso": a_peso,
+    return {"filas": filas, "a_revisar": revisar, "sin_equivalente": sin_eq, "a_peso": a_peso,
             "totales": {"emparejado_carrefour_lista": t_lista, "emparejado_carrefour_pagado": t_pag, "emparejado_alcampo": t_alc,
                         "emparejado_alcampo_con_promo": t_alc_p, "sin_equivalente_carrefour_lista": v_sin,
                         "a_peso_carrefour_lista": v_peso, "cobertura_valor": round(cobertura, 3),
@@ -433,13 +454,13 @@ def _eur(x):
 
 
 def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
-    t, n_fil, n_sin, n_peso = r["totales"], len(r["filas"]), len(r["sin_equivalente"]), len(r["a_peso"])
+    t, n_fil, n_sin, n_peso = r["totales"], len(r["filas"]), len(r["sin_equivalente"]) + len(r["a_revisar"]), len(r["a_peso"])
     tt = pedido.get("totales") or {}
     out = [f"Pedido de Carrefour {pedido.get('id')} ({str(pedido.get('fecha_pedido') or '')[:10]}): {len(pedido.get('lineas') or [])} líneas, "
            f"pagaste {_eur(tt.get('total_final') or 0)} (envío {_eur(tt.get('envio_pagado') or 0)}; cheque ahorro {_eur(tt.get('cheque_ahorro_usado') or 0)}).",
            f"Alcampo: precios{' del ' + fecha_precios if fecha_precios else ''}{' · zona: ' + destino if destino else ''}.",
            "", f"Emparejado: {n_fil} de {n_fil + n_sin} líneas comparables ({t['cobertura_valor'] * 100:.0f} % del valor). "
-           f"{n_peso} a peso (no comparables) y {n_sin} sin equivalente.", "",
+           f"{n_peso} a peso (no comparables) y {n_sin} sin equivalente fiable ({len(r['a_revisar'])} de ellas a revisar abajo).", "",
            "Sobre lo emparejado:",
            f"  Carrefour, precio de lista:  {_eur(t['emparejado_carrefour_lista'])}   (lo que pagaste, con promos: {_eur(t['emparejado_carrefour_pagado'])})",
            f"  Alcampo, estantería:         {_eur(t['emparejado_alcampo'])}   ({_pct(t['emparejado_alcampo'], t['emparejado_carrefour_lista'])})"]
@@ -465,11 +486,17 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
     car = [fila(f) for f in por_dif[::-1] if f["coste_con_promo"] > f["carrefour_lista"]][:8]
     out += ["", "Donde Alcampo sale MÁS barato:"] + (alc or ["  (ninguno)"])
     out += ["", "Donde Carrefour sale MÁS barato:"] + (car or ["  (ninguno)"])
-    avisos = [f"{sum(1 for f in r['filas'] if f['nivel'] == 'laxa')} con equivalencia laxa (revisar)",
+    avisos = [
               f"{sum(1 for f in r['filas'] if f['formato'].startswith('ajustado'))} con tamaño distinto (coste ajustado por precio por unidad)",
               f"{sum(1 for f in r['filas'] if not f['misma_marca'])} con otra marca (marcas blancas o equivalentes)",
               f"{sum(1 for f in r['filas'] if f['promo_aplicada'])} con promoción por cantidad aplicada"]
     out += ["", "Avisos: " + "; ".join(avisos) + ".", "No incluye: descuentos de cliente, cheque ahorro, promociones de pedido ni el envío de Alcampo."]
+    if r["a_revisar"]:
+        out += ["", "A REVISAR (equivalencia laxa o formato sin comprobar; NO cuentan en los totales):"]
+        for f in r["a_revisar"]:
+            c = f["alcampo"]
+            out.append(f"  {f['nombre'][:45]} x{f['cantidad']} Carrefour {_eur(f['carrefour_lista'])}\n"
+                       f"     -> {c['nombre'][:60]} [{c.get('envase') or '?'}] {_eur(c['precio'])} ({f['nivel']}, {f['formato']})")
     if r["sin_equivalente"]:
         out += ["", "Sin equivalente en Alcampo (o no encontrado):"] + [f"  {s['nombre'][:60]} x{s['cantidad']}" for s in r["sin_equivalente"][:15]]
     return "\n".join(out)

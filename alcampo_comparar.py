@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.5"
+VERSION = "1.6"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -491,6 +491,15 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
               f"{sum(1 for f in r['filas'] if not f['misma_marca'])} con otra marca (marcas blancas o equivalentes)",
               f"{sum(1 for f in r['filas'] if f['promo_aplicada'])} con promoción por cantidad aplicada"]
     out += ["", "Avisos: " + "; ".join(avisos) + ".", "No incluye: descuentos de cliente, cheque ahorro, promociones de pedido ni el envío de Alcampo."]
+    grandes = sorted((f for f in r["filas"] if f["carrefour_lista"] and abs(f["coste_con_promo"] / f["carrefour_lista"] - 1) >= 0.4),
+                     key=lambda f: f["coste_con_promo"] / f["carrefour_lista"])
+    if grandes:
+        out += ["", "DIFERENCIAS GRANDES (±40 %): comprueba que son el mismo producto y el mismo envase:"]
+        for f in grandes[:14]:
+            c = f["alcampo"]
+            out.append(f"  {f['nombre'][:70]} x{f['cantidad']}: Carrefour {_eur(f['carrefour_lista'])}\n"
+                       f"     Alcampo {_eur(f['coste_con_promo'])} <- {c['nombre'][:70]} [{c.get('envase') or '?'}] a {_eur(c['precio'])}/ud "
+                       f"({f['formato']}; {'misma marca' if f['misma_marca'] else 'otra marca'})")
     if r["a_revisar"]:
         out += ["", "A REVISAR (equivalencia laxa o formato sin comprobar; NO cuentan en los totales):"]
         for f in r["a_revisar"]:

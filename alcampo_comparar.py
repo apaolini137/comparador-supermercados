@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.18"
+VERSION = "1.19"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -100,6 +100,9 @@ _GEN_R = {_raiz(x) for x in ("especial", "tradicional", "clasico", "original", "
                              "selecta", "seleccion", "mini", "maxi", "nuevo", "gran", "grande",
                              # formas de corte: dados, rodajas o troceado es el mismo producto para quien compra
                              "dados", "rodajas", "troceado", "troceada", "trozos", "cortado", "cortada", "laminas", "tiras", "mitades")}
+
+
+_CORTE_R = {_raiz(x) for x in ("dados", "rodajas", "troceado", "troceada", "trozos", "cortado", "cortada", "laminas", "tiras", "mitades")}
 
 
 _USOS_R = [{_raiz(x) for x in g} for g in (
@@ -446,6 +449,8 @@ def emparejar(linea, productos, n=None):
         if not nivel:
             continue
         completo = sim >= 0.999                                        # el candidato contiene todas las palabras del original (misma gama)
+        # el corte no es una diferencia, pero si el original viene cortado se prefiere el candidato cortado (no una cebolla fresca de 2 kg)
+        corte_ok = not ({_raiz(w) for w in _palabras(linea["nombre"])} & _CORTE_R) or bool({_raiz(w) for w in _palabras(c["nombre"])} & _CORTE_R)
         n_o, n_c = unidades(linea["nombre"]), unidades(f"{c['nombre']} {c.get('envase') or ''}")
         base_o, base_c, medida = (tam_o, tam_c, "tamaño") if tam_o and tam_c else ((n_o, n_c, "unidades") if n_o and n_c else (None, None, None))
         ratio = base_c / base_o if base_o and base_c else None
@@ -454,7 +459,7 @@ def emparejar(linea, productos, n=None):
         en_rango = ratio is not None and (0.5 <= ratio <= 2.0 or any(m >= 2 and abs(f - m) <= 0.03 * m for f in (ratio, 1 / ratio) for m in [round(f)]))
         misma_marca = _marca_en_nombre(c.get("marca", ""), linea["nombre"])
         por_original = c["precio"] / ratio if ratio else c["precio"]  # lo que costaría un envase del tamaño del original
-        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo))
+        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, not corte_ok, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo))
     if not mejores:
         return None if n is None else []
     orden = sorted(mejores, key=lambda x: x[0])
@@ -826,7 +831,11 @@ def cmd_confirmar(a):
     if not fich:
         raise SystemExit("Faltan los resultados de Alcampo: haz antes el paso normal (consultas -> consola).")
     dec = cargar_decisiones(a.decisiones)
-    pend = [f for f in comparar_pedido(p, res, dec)["a_revisar"] if f["nombre"] not in dec]
+    r0 = comparar_pedido(p, res, dec)
+    pend = [f for f in r0["a_revisar"] if f["nombre"] not in dec]
+    if a.grandes:                                                       # además, vuelve a preguntar las de diferencia ±40 % (aunque ya las hayas contestado)
+        ya = {f["nombre"] for f in pend}
+        pend += [f for f in r0["filas"] if f["carrefour_lista"] and abs(f["coste_con_promo"] / f["carrefour_lista"] - 1) >= 0.4 and f["nombre"] not in ya]
     if not pend:
         print("Nada pendiente de confirmar.")
         return 0
@@ -952,6 +961,7 @@ def main(argv=None):
         s.add_argument("--decisiones", default="emparejamientos_alcampo.json", help="dónde se guardan tus confirmaciones")
         if nombre == "confirmar":
             s.add_argument("--resultados", default="alcampo_resultados.json")
+            s.add_argument("--grandes", action="store_true", help="vuelve a preguntar también las líneas con diferencia de precio de ±40 %%")
         elif nombre == "diagnostico":
             s.add_argument("--resultados", default="alcampo_resultados.json")
             s.add_argument("--lineas", type=int, default=8, help="cuántas líneas sin equivalente detallar")

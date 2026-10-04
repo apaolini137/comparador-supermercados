@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.13"
+VERSION = "1.15"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -410,6 +410,9 @@ def emparejar(linea, productos):
     o = _perfil(linea["nombre"], "", linea.get("venta"))
     tam_o = o["tamano"]
     o_sin = dict(o, tamano=None)
+    # marcas probables del original: palabras con mayúscula inicial que no son la primera ('Aperol', 'Babybel', 'Vulpi')
+    marcas_o = {_raiz(t.lower()) for t in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", linea["nombre"])[1:]
+                if t[0].isupper() and len(t) >= 4 and t.lower() not in _NO_MARCA}
     mejores = []
     for c in productos:
         if not c.get("disponible") or not c.get("precio"):
@@ -419,6 +422,9 @@ def emparejar(linea, productos):
         pc = dict(pc, tamano=None)
         sim = _parecido(o_sin, pc, True)
         nivel = "estricta" if sim else ("laxa" if _parecido(o_sin, pc, False) else None)
+        solo_marca = False
+        if not nivel and marcas_o & {_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", str(c.get("marca") or "").lower())}:
+            nivel, solo_marca = "laxa", True               # misma marca aunque el nombre del tipo difiera ('Licor aperitivo Aperol' / 'Aperitivo APEROL')
         if not nivel:
             continue
         completo = sim >= 0.999                                        # el candidato contiene todas las palabras del original (misma gama)
@@ -430,10 +436,10 @@ def emparejar(linea, productos):
         en_rango = ratio is not None and (0.5 <= ratio <= 2.0 or any(m >= 2 and abs(f - m) <= 0.03 * m for f in (ratio, 1 / ratio) for m in [round(f)]))
         misma_marca = _marca_en_nombre(c.get("marca", ""), linea["nombre"])
         por_original = c["precio"] / ratio if ratio else c["precio"]  # lo que costaría un envase del tamaño del original
-        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida))
+        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo_marca))
     if not mejores:
         return None
-    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida = min(mejores, key=lambda x: x[0])
+    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo_marca = min(mejores, key=lambda x: x[0])
     q, precio = linea["cantidad"], c["precio"]
     if base_o and base_c:
         coste = round(precio * (q * base_o) / base_c, 2)               # siempre al precio por unidad: 1,5 l no cuesta lo que 1,25 l
@@ -446,6 +452,8 @@ def emparejar(linea, productos):
             formato += " - tamaño muy distinto"
     else:
         coste, formato = round(precio * q, 2), "tamaño sin comprobar"
+    if solo_marca:
+        formato += " - solo coincide la marca"
     ahorro, texto_promo = ahorro_promo(c.get("promos"), precio, q) if comparable else (0.0, None)
     return {"alcampo": c, "nivel": nivel, "misma_marca": misma_marca, "formato": formato, "coste": coste, "en_rango": en_rango,
             "coste_con_promo": round(coste - ahorro, 2), "promo_aplicada": texto_promo}
@@ -775,6 +783,26 @@ def cmd_comparar(a):
     return 0
 
 
+def motivo_rechazo(o, c):
+    """Por qué _parecido (modo laxo) descarta a un candidato, en una frase; mismas comprobaciones y en el mismo orden."""
+    if not o["head"] or (c["head"] != o["head"] and o["head"] not in (c.get("ini") or [])):
+        return f"el tipo no coincide (original '{o['head']}', candidato '{c['head']}')"
+    if not o["attrs"] <= c["attrs"]:
+        return f"le falta un atributo: {sorted(o['attrs'] - c['attrs'])}"
+    if o["formatos"] and c["formatos"] and not (o["formatos"] & c["formatos"]):
+        return "formato de envase distinto"
+    if c["estado"] == "fresco" and not o["fresco_probable"]:
+        return "el candidato es fresco y el original no"
+    if o["estado"] and c["estado"] and o["estado"] != c["estado"]:
+        return f"estado distinto ({o['estado']} frente a {c['estado']})"
+    if o["usos"] and not (o["usos"] & c["usos"]):
+        return "uso distinto"
+    sim = len(o["resto"] & (c["resto_total"] | {c["head"]})) / len(o["resto"]) if o["resto"] else 1.0
+    if sim < 0.25:
+        return f"pocas palabras en común ({sim:.0%}); le faltan {sorted(o['resto'] - c['resto_total'] - {c['head']})}"
+    return "aceptable en modo laxo (se descarta por no estar disponible o sin precio)"
+
+
 def cmd_diagnostico(a):
     """Informe corto para saber POR QUÉ no se empareja: búsquedas vacías, y candidatos que devolvió Alcampo para las líneas sin equivalente."""
     h, _ = cargar_historial(a.historial)
@@ -801,17 +829,23 @@ def cmd_diagnostico(a):
     for l in p.get("lineas") or []:
         if es_a_peso(l):
             continue
-        pool = {c["sku"]: c for q in consultas_de_linea(l["nombre"]) for c in res.get(q) or []}
+        qs_l = consultas_de_linea(l["nombre"]) + consultas_extra(l["nombre"])
+        pool = {c["sku"]: c for q in qs_l for c in res.get(q) or []}
         if emparejar(l, list(pool.values())) is not None:
             continue
         n += 1
         if n > a.lineas:
             break
-        print(f"\n- {l['nombre']}\n  búsquedas: " + "; ".join(f"'{q}'={len(res.get(q) or [])}" for q in consultas_de_linea(l["nombre"])))
+        print(f"\n- {l['nombre']}\n  búsquedas: " + "; ".join(f"'{q}'={len(res[q])}" for q in qs_l if q in res))
         pf = _perfil(l["nombre"], "", l.get("venta"))
         print(f"  tipo={pf['head']} atributos={sorted(pf['attrs'])} resto={sorted(pf['resto'])}")
+        if not pool:
+            print("    (ninguna búsqueda devolvió productos)")
+        o_perf = dict(pf, tamano=None)
         for c in list(pool.values())[:3]:
-            print(f"    candidato: {c['nombre'][:50]} [{c['marca']}] disp={c['disponible']} precio={c['precio']}")
+            pc = dict(_perfil(limpiar_nombre_alcampo(c["nombre"]), c.get("marca", "")), tamano=None)
+            print(f"    candidato: {c['nombre'][:60]} [{c['marca']}] disp={c['disponible']} precio={c['precio']}\n"
+                  f"       descartado porque: {motivo_rechazo(o_perf, pc)}")
     return 0
 
 

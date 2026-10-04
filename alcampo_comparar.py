@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.8"
+VERSION = "1.9"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -80,11 +80,11 @@ _ATTR_R = {_raiz(x) for x in _ATRIBUTOS}
 
 
 # calificadores que no pueden perderse en un equivalente estricto ('de oliva' no es 'vegetal'; 'doble rollo' no es un rollo normal)
-_CALIF_R = {_raiz(x) for x in ("oliva", "virgen", "girasol", "desnatada", "semidesnatada", "entera", "doble", "triple", "compact")}
+_CALIF_R = {_raiz(x) for x in ("oliva", "virgen", "girasol", "desnatada", "semidesnatada", "entera", "doble", "triple", "compact", "gas")}
 
 
 # ingredientes/coberturas que convierten un producto en otro ('tortita de arroz' != 'tortita con chocolate')
-_EXTRAS_R = {_raiz(x) for x in ("chocolate", "cacao", "caramelo", "yogur", "coco", "miel")}
+_EXTRAS_R = {_raiz(x) for x in ("chocolate", "cacao", "caramelo", "yogur", "coco", "miel", "campero", "camperas", "gourmet")}
 
 
 # palabras de forma que pueden ir delante del tipo ('Hojas de espinaca' = espinacas)
@@ -402,22 +402,29 @@ def emparejar(linea, productos):
             continue
         n_o, n_c = unidades(linea["nombre"]), unidades(f"{c['nombre']} {c.get('envase') or ''}")
         base_o, base_c, medida = (tam_o, tam_c, "tamaño") if tam_o and tam_c else ((n_o, n_c, "unidades") if n_o and n_c else (None, None, None))
-        comparable = bool(base_o and base_c and 0.8 <= base_c / base_o <= 1.25)
+        ratio = base_c / base_o if base_o and base_c else None
+        comparable = ratio is not None and 0.8 <= ratio <= 1.25
+        en_rango = ratio is not None and 0.5 <= ratio <= 2.0          # fuera de este rango el precio por unidad no es fiable
         misma_marca = _marca_en_nombre(c.get("marca", ""), linea["nombre"])
-        pu = c.get("precio_unidad") or (c["precio"] / (tam_c / 1000) if tam_c else c["precio"])
-        mejores.append(((nivel != "estricta", not misma_marca, not comparable, pu), c, nivel, misma_marca, comparable, base_o, base_c, medida))
+        por_original = c["precio"] / ratio if ratio else c["precio"]  # lo que costaría un envase del tamaño del original
+        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida))
     if not mejores:
         return None
-    _, c, nivel, misma_marca, comparable, base_o, base_c, medida = min(mejores, key=lambda x: x[0])
+    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida = min(mejores, key=lambda x: x[0])
     q, precio = linea["cantidad"], c["precio"]
-    if base_o and base_c and not comparable:
-        coste = round(precio * (q * base_o) / base_c, 2)
-        formato = (f"ajustado por tamaño ({c['envase']} frente a {_texto_tamano(linea['nombre']) or 'el original'})" if medida == "tamaño"
-                   else f"ajustado por unidades ({base_c:g} frente a {base_o:g})")
+    if base_o and base_c:
+        coste = round(precio * (q * base_o) / base_c, 2)               # siempre al precio por unidad: 1,5 l no cuesta lo que 1,25 l
+        if comparable:
+            formato = "mismo formato"
+        else:
+            formato = (f"ajustado por tamaño ({c['envase']} frente a {_texto_tamano(linea['nombre']) or 'el original'})" if medida == "tamaño"
+                       else f"ajustado por unidades ({base_c:g} frente a {base_o:g})")
+        if not en_rango:
+            formato += " - tamaño muy distinto"
     else:
-        coste, formato = round(precio * q, 2), "mismo formato" if comparable else "tamaño sin comprobar"
+        coste, formato = round(precio * q, 2), "tamaño sin comprobar"
     ahorro, texto_promo = ahorro_promo(c.get("promos"), precio, q) if comparable else (0.0, None)
-    return {"alcampo": c, "nivel": nivel, "misma_marca": misma_marca, "formato": formato, "coste": coste,
+    return {"alcampo": c, "nivel": nivel, "misma_marca": misma_marca, "formato": formato, "coste": coste, "en_rango": en_rango,
             "coste_con_promo": round(coste - ahorro, 2), "promo_aplicada": texto_promo}
 
 
@@ -452,7 +459,7 @@ def comparar_pedido(pedido, resultados):
             continue
         fila = {"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe") or 0.0, **e}
         # fiable = equivalencia estricta y formato comprobado; lo demás se lista aparte y no cuenta en los totales
-        (filas if e["nivel"] == "estricta" and e["formato"] != "tamaño sin comprobar" else revisar).append(fila)
+        (filas if e["nivel"] == "estricta" and e["en_rango"] else revisar).append(fila)
     t_lista = round(sum(f["carrefour_lista"] for f in filas), 2)
     t_pag = round(sum(f["carrefour_pagado"] for f in filas), 2)
     t_alc = round(sum(f["coste"] for f in filas), 2)

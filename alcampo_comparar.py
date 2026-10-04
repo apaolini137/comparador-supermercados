@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -144,7 +144,8 @@ def _perfil(nombre, marca="", venta=None):
     resto_total = {grupo(r) for r in raices[1:] if r not in _GEN_R}
     todas = set(raices)
     estado = next((nom for nom, g in _ESTADOS_R.items() if todas & g), None)
-    return {"head": raices[0] if raices else None, "resto_total": resto_total, "resto": resto_total - de_marca,
+    cabeza = next((r for r in raices if r not in _GEN_R), raices[0] if raices else None)
+    return {"head": cabeza, "resto_total": resto_total, "resto": resto_total - de_marca,
             "attrs": {r for r in raices if r in _ATTR_R}, "formatos": {r for r in raices if r in _FORM_R},
             "usos": {i for i, g in enumerate(_USOS_R) if todas & g},
             "estado": estado,
@@ -308,6 +309,15 @@ def consultas_del_pedido(pedido):
 
 # ================================================================ emparejamiento y coste
 
+def limpiar_nombre_alcampo(nombre):
+    """Los nombres de Alcampo empiezan por la marca en mayúsculas ('AUCHAN Queso rallado...', 'PRODUCTO ALCAMPO Alcaparras...').
+    Se quita ese prefijo para que el tipo de producto sea la primera palabra real; se conservan los atributos ('ECOLÓGICO', 'BIO')."""
+    toks, i = str(nombre or "").split(), 0
+    while i < len(toks) - 1 and any(ch.isalpha() for ch in toks[i]) and toks[i] == toks[i].upper():
+        i += 1
+    return " ".join(toks[i:] + [t for t in toks[:i] if _raiz(re.sub(r"[^\wáéíóúüñÁÉÍÓÚÜÑ]", "", t)) in _ATTR_R])
+
+
 def _marca_en_nombre(marca, nombre):
     mt = [_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", _sin_acentos(marca).lower()) if len(w) > 1]
     nt = {_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", _sin_acentos(nombre).lower())}
@@ -347,7 +357,7 @@ def emparejar(linea, productos):
     for c in productos:
         if not c.get("disponible") or not c.get("precio"):
             continue
-        pc = _perfil(c["nombre"], c.get("marca", ""))
+        pc = _perfil(limpiar_nombre_alcampo(c["nombre"]), c.get("marca", ""))
         tam_c = tamano_envase(c.get("envase")) or pc["tamano"]
         pc = dict(pc, tamano=None)
         nivel = "estricta" if _parecido(o_sin, pc, True) else ("laxa" if _parecido(o_sin, pc, False) else None)

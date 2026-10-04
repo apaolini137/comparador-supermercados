@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.17"
+VERSION = "1.18"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -409,8 +409,9 @@ def ahorro_promo(promos, precio, q):
     return 0.0, None
 
 
-def emparejar(linea, productos):
-    """Elige en Alcampo el equivalente de una línea de Carrefour. Devuelve None si no hay ninguno.
+def emparejar(linea, productos, n=None):
+    """Elige en Alcampo el equivalente de una línea de Carrefour. Devuelve None si no hay ninguno. Con n, devuelve una lista
+    con los n mejores candidatos (para que el usuario elija en 'confirmar').
     El tamaño NO descarta (un pack de 6 briks sí se compara con un brik, por precio por unidad); solo se avisa y se ajusta."""
     o = _perfil(linea["nombre"], "", linea.get("venta"))
     tam_o = o["tamano"]
@@ -455,8 +456,16 @@ def emparejar(linea, productos):
         por_original = c["precio"] / ratio if ratio else c["precio"]  # lo que costaría un envase del tamaño del original
         mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo))
     if not mejores:
-        return None
-    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo = min(mejores, key=lambda x: x[0])
+        return None if n is None else []
+    orden = sorted(mejores, key=lambda x: x[0])
+    if n is None:
+        return _construir(linea, orden[0])
+    return [_construir(linea, m) for m in orden[:n]]
+
+
+def _construir(linea, m):
+    """Del candidato elegido al resultado: coste ajustado al tamaño, formato y promoción."""
+    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo = m
     q, precio = linea["cantidad"], c["precio"]
     if base_o and base_c:
         coste = round(precio * (q * base_o) / base_c, 2)               # siempre al precio por unidad: 1,5 l no cuesta lo que 1,25 l
@@ -486,21 +495,48 @@ def valor_lista(linea):
     return round(pu * (linea.get("cantidad") or 0), 2)
 
 
-def comparar_pedido(pedido, resultados):
-    """resultados: {consulta: [productos de Alcampo]}. Devuelve el detalle por línea y los totales."""
+def pool_de_linea(linea, resultados):
+    """Productos de Alcampo encontrados por las búsquedas de esta línea (sin repetir)."""
+    pool, vistos = [], set()
+    for q in consultas_de_linea(linea["nombre"]) + consultas_extra(linea["nombre"]):
+        for c in resultados.get(q) or []:
+            if c.get("sku") not in vistos:
+                vistos.add(c.get("sku"))
+                pool.append(c)
+    return pool
+
+
+def cargar_decisiones(ruta):
+    r = Path(ruta)
+    return json.loads(r.read_text(encoding="utf-8")) if r.is_file() else {}
+
+
+def guardar_decisiones(ruta, dec):
+    Path(ruta).write_text(json.dumps(dec, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def comparar_pedido(pedido, resultados, decisiones=None):
+    """resultados: {consulta: [productos de Alcampo]}. decisiones: lo que el usuario confirmó o rechazó en 'confirmar'.
+    Devuelve el detalle por línea y los totales."""
     filas, revisar, a_peso, sin_eq = [], [], [], []
     for l in pedido.get("lineas") or []:
         if es_a_peso(l):
             a_peso.append({"nombre": l["nombre"], "carrefour_lista": valor_lista(l)})
             continue
-        pool, vistos = [], set()
-        for q in consultas_de_linea(l["nombre"]) + consultas_extra(l["nombre"]):
-            for c in resultados.get(q) or []:
-                if c.get("sku") not in vistos:
-                    vistos.add(c.get("sku"))
-                    pool.append(c)
-        e = emparejar(l, pool)
+        pool = pool_de_linea(l, resultados)
         lista = valor_lista(l)
+        d = (decisiones or {}).get(l["nombre"]) or {}
+        if d.get("decision") == "no":                                  # tú dijiste que ninguno vale
+            sin_eq.append({"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe"), "descartado": True})
+            continue
+        e = None
+        if d.get("decision") == "si":                                  # tú elegiste este candidato
+            e = next((x for x in emparejar(l, pool, n=50) if x["alcampo"].get("sku") == d.get("sku")), None)
+            if e:
+                e = dict(e, en_rango=True, confirmado=True, formato=e["formato"] + " - confirmado por ti")
+                filas.append({"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe") or 0.0, **e})
+                continue
+        e = emparejar(l, pool)
         if e is None:
             sin_eq.append({"nombre": l["nombre"], "cantidad": l["cantidad"], "carrefour_lista": lista, "carrefour_pagado": l.get("importe")})
             continue
@@ -544,7 +580,8 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
            f"pagaste {_eur(tt.get('total_final') or 0)} (envío {_eur(tt.get('envio_pagado') or 0)}; cheque ahorro {_eur(tt.get('cheque_ahorro_usado') or 0)}).",
            f"Alcampo: precios{' del ' + fecha_precios if fecha_precios else ''}{' · zona: ' + destino if destino else ''}.",
            "", f"Emparejado: {n_fil} de {n_fil + n_sin} líneas comparables ({t['cobertura_valor'] * 100:.0f} % del valor). "
-           f"{n_peso} a peso (no comparables) y {n_sin} sin equivalente fiable ({len(r['a_revisar'])} de ellas a revisar abajo).", "",
+           f"{n_peso} a peso (no comparables) y {n_sin} sin equivalente fiable ({len(r['a_revisar'])} de ellas a revisar abajo)."
+           + (f" {sum(1 for f in r['filas'] if f.get('confirmado'))} confirmadas por ti." if any(f.get('confirmado') for f in r['filas']) else ""), "",
            "Sobre lo emparejado:",
            f"  Carrefour, precio de lista:  {_eur(t['emparejado_carrefour_lista'])}   (lo que pagaste, con promos: {_eur(t['emparejado_carrefour_pagado'])})",
            f"  Alcampo, estantería:         {_eur(t['emparejado_alcampo'])}   ({_pct(t['emparejado_alcampo'], t['emparejado_carrefour_lista'])})"]
@@ -586,7 +623,7 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
                        f"     Alcampo {_eur(f['coste_con_promo'])} <- {c['nombre'][:70]} [{c.get('envase') or '?'}] a {_eur(c['precio'])}/ud "
                        f"({f['formato']}; {'misma marca' if f['misma_marca'] else 'otra marca'})")
     if r["a_revisar"]:
-        out += ["", "A REVISAR (equivalencia laxa o formato sin comprobar; NO cuentan en los totales):"]
+        out += ["", "A REVISAR (equivalencia laxa o formato sin comprobar; NO cuentan en los totales). Confírmalas con: python alcampo_comparar.py confirmar"]
         for f in r["a_revisar"]:
             c = f["alcampo"]
             out.append(f"  {f['nombre'][:45]} x{f['cantidad']} Carrefour {_eur(f['carrefour_lista'])}\n"
@@ -781,6 +818,46 @@ def cmd_consultas(a):
     return 0
 
 
+def cmd_confirmar(a):
+    """Pregunta, línea a línea, si el candidato de Alcampo vale. Se guarda en --decisiones y no se vuelve a preguntar."""
+    h, _ = cargar_historial(a.historial)
+    p = elegir_pedido(h, a.pedido)
+    res, fich, _, _ = cargar_resultados(a.resultados)
+    if not fich:
+        raise SystemExit("Faltan los resultados de Alcampo: haz antes el paso normal (consultas -> consola).")
+    dec = cargar_decisiones(a.decisiones)
+    pend = [f for f in comparar_pedido(p, res, dec)["a_revisar"] if f["nombre"] not in dec]
+    if not pend:
+        print("Nada pendiente de confirmar.")
+        return 0
+    lineas = {l["nombre"]: l for l in p.get("lineas") or []}
+    print(f"{len(pend)} líneas por confirmar. En cada una: s = sí, vale el 1 · 2 o 3 = vale ese otro · n = ninguno vale · Intro = saltar · q = salir.\n")
+    for i, f in enumerate(pend, 1):
+        l = lineas[f["nombre"]]
+        cands = emparejar(l, pool_de_linea(l, res), n=3)
+        print(f"[{i}/{len(pend)}] Carrefour: {l['nombre']}  x{l['cantidad']}  (lista {_eur(valor_lista(l))})")
+        for k, e in enumerate(cands, 1):
+            c = e["alcampo"]
+            print(f"   {k}) {c['nombre'][:80]} [{c.get('envase') or '?'}] {_eur(c['precio'])}  -> tu cantidad costaría {_eur(e['coste_con_promo'])}\n"
+                  f"      ({e['nivel']}, {e['formato']})")
+        try:
+            resp = input("   ¿Vale? > ").strip().lower()
+        except EOFError:
+            resp = "q"
+        if resp == "q":
+            break
+        if resp in ("n", "no"):
+            dec[l["nombre"]] = {"decision": "no"}
+        elif resp in ("s", "si", "sí", "1", "2", "3"):
+            k = 1 if resp in ("s", "si", "sí") else int(resp)
+            if k <= len(cands):
+                dec[l["nombre"]] = {"decision": "si", "sku": cands[k - 1]["alcampo"].get("sku"), "alcampo": cands[k - 1]["alcampo"]["nombre"]}
+        guardar_decisiones(a.decisiones, dec)
+        print()
+    print("Guardado en " + a.decisiones + ". Ahora: python alcampo_comparar.py comparar")
+    return 0
+
+
 def cmd_comparar(a):
     h, _ = cargar_historial(a.historial)
     p = elegir_pedido(h, a.pedido)
@@ -788,7 +865,7 @@ def cmd_comparar(a):
     if not fich:
         raise SystemExit(f"No encuentro {a.resultados}. Primero: python alcampo_comparar.py consultas, y pega alcampo_exportar_listo.js en la consola de Alcampo (paso 2).")
     faltan = [q for q in consultas_del_pedido(p) if q not in res]
-    r = comparar_pedido(p, res)
+    r = comparar_pedido(p, res, cargar_decisiones(a.decisiones))
     print("Resultados de Alcampo: " + ", ".join(f.name for f in fich))
     if faltan:
         print(f"AVISO: faltan {len(faltan)} búsquedas de este pedido (sus productos saldrán como 'sin equivalente'). "
@@ -868,11 +945,14 @@ def cmd_diagnostico(a):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Compara un pedido de Carrefour con los precios de Alcampo.")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for nombre, f in (("consultas", cmd_consultas), ("comparar", cmd_comparar), ("diagnostico", cmd_diagnostico)):
+    for nombre, f in (("consultas", cmd_consultas), ("comparar", cmd_comparar), ("diagnostico", cmd_diagnostico), ("confirmar", cmd_confirmar)):
         s = sub.add_parser(nombre)
         s.add_argument("--historial", help="ruta de historial_pedidos.json (por defecto lo busca solo)")
         s.add_argument("--pedido", help="id del pedido de Carrefour (por defecto, el más reciente con 20 líneas o más)")
-        if nombre == "diagnostico":
+        s.add_argument("--decisiones", default="emparejamientos_alcampo.json", help="dónde se guardan tus confirmaciones")
+        if nombre == "confirmar":
+            s.add_argument("--resultados", default="alcampo_resultados.json")
+        elif nombre == "diagnostico":
             s.add_argument("--resultados", default="alcampo_resultados.json")
             s.add_argument("--lineas", type=int, default=8, help="cuántas líneas sin equivalente detallar")
         elif nombre == "consultas":

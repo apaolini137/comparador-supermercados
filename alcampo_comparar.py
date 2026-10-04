@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.9"
+VERSION = "1.10"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -397,17 +397,20 @@ def emparejar(linea, productos):
         pc = _perfil(limpiar_nombre_alcampo(c["nombre"]), c.get("marca", ""))
         tam_c = tamano_envase(c.get("envase")) or pc["tamano"]
         pc = dict(pc, tamano=None)
-        nivel = "estricta" if _parecido(o_sin, pc, True) else ("laxa" if _parecido(o_sin, pc, False) else None)
+        sim = _parecido(o_sin, pc, True)
+        nivel = "estricta" if sim else ("laxa" if _parecido(o_sin, pc, False) else None)
         if not nivel:
             continue
+        completo = sim >= 0.999                                        # el candidato contiene todas las palabras del original (misma gama)
         n_o, n_c = unidades(linea["nombre"]), unidades(f"{c['nombre']} {c.get('envase') or ''}")
         base_o, base_c, medida = (tam_o, tam_c, "tamaño") if tam_o and tam_c else ((n_o, n_c, "unidades") if n_o and n_c else (None, None, None))
         ratio = base_c / base_o if base_o and base_c else None
         comparable = ratio is not None and 0.8 <= ratio <= 1.25
-        en_rango = ratio is not None and 0.5 <= ratio <= 2.0          # fuera de este rango el precio por unidad no es fiable
+        # fuera de 0,5x-2x el precio por unidad no es fiable, salvo que sea un múltiplo exacto (6 x 1 l frente a 1 l: mismo envase en multipack)
+        en_rango = ratio is not None and (0.5 <= ratio <= 2.0 or any(m >= 2 and abs(f - m) <= 0.03 * m for f in (ratio, 1 / ratio) for m in [round(f)]))
         misma_marca = _marca_en_nombre(c.get("marca", ""), linea["nombre"])
         por_original = c["precio"] / ratio if ratio else c["precio"]  # lo que costaría un envase del tamaño del original
-        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida))
+        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida))
     if not mejores:
         return None
     _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida = min(mejores, key=lambda x: x[0])

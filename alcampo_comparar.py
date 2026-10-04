@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.20"
+VERSION = "1.21"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -596,6 +596,10 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
     out += ["", "Cesta completa (lo no emparejado y lo de peso cuentan al precio de Carrefour en los dos lados):",
             f"  Carrefour, precio de lista:  {_eur(base)}",
             f"  Alcampo, estimación:         {_eur(est)}   ({_pct(est, base)})"]
+    pagado = tt.get("total_final")
+    if pagado:
+        out.append(f"  Lo que pagaste de verdad en Carrefour: {_eur(pagado)} (con sus descuentos, el cheque ahorro de {_eur(tt.get('cheque_ahorro_usado') or 0)} y el envío que cobraron). "
+                   f"Sin contar el cheque: {_eur(pagado + (tt.get('cheque_ahorro_usado') or 0))}.")
     sd = tt.get("productos_sin_descuentos")
     if sd and abs(sd - base) > 0.05 * sd:
         out.append(f"  (Ojo: el pedido dice {_eur(sd)} sin descuentos; la diferencia suele venir de productos no entregados o sustituidos.)")
@@ -620,7 +624,7 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
               f"{sum(1 for f in r['filas'] if f['formato'].startswith('ajustado'))} con tamaño distinto (coste ajustado por precio por unidad)",
               f"{sum(1 for f in r['filas'] if not f['misma_marca'])} con otra marca (marcas blancas o equivalentes)",
               f"{sum(1 for f in r['filas'] if f['promo_aplicada'])} con promoción por cantidad aplicada"]
-    out += ["", "Avisos: " + "; ".join(avisos) + ".", "No incluye: descuentos de cliente, cheque ahorro, promociones de pedido ni el envío de Alcampo."]
+    out += ["", "Avisos: " + "; ".join(avisos) + ".", "No incluye: descuentos de cliente (Club Alcampo, cheque ahorro), promociones de pedido ni ofertas de cesta de ninguna de las dos cadenas."]
     grandes = sorted((f for f in r["filas"] if f["carrefour_lista"] and abs(f["coste_con_promo"] / f["carrefour_lista"] - 1) >= 0.4),
                      key=lambda f: f["coste_con_promo"] / f["carrefour_lista"])
     if grandes:

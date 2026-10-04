@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.6"
+VERSION = "1.7"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -79,6 +79,18 @@ _ETIQ_ATTR = {"gluten": "sin gluten (una mezcla sin gluten se comporta distinto)
 _ATTR_R = {_raiz(x) for x in _ATRIBUTOS}
 
 
+# calificadores que no pueden perderse en un equivalente estricto ('de oliva' no es 'vegetal'; 'doble rollo' no es un rollo normal)
+_CALIF_R = {_raiz(x) for x in ("oliva", "virgen", "girasol", "desnatada", "semidesnatada", "entera", "doble", "triple", "compact")}
+
+
+# ingredientes/coberturas que convierten un producto en otro ('tortita de arroz' != 'tortita con chocolate')
+_EXTRAS_R = {_raiz(x) for x in ("chocolate", "cacao", "caramelo", "yogur", "coco", "miel")}
+
+
+# palabras de forma que pueden ir delante del tipo ('Hojas de espinaca' = espinacas)
+_FORMA_R = {_raiz(x) for x in ("hojas", "porciones", "trozos", "cubos", "rodajas", "filetes", "lonchas", "laminas", "brotes", "tiras", "mitades")}
+
+
 _FORM_R = {_raiz(x) for x in _FORMATOS}
 
 
@@ -100,7 +112,8 @@ _ESTADOS_R = {"fresco": {_raiz(x) for x in ("fresco", "fresca", "frescos", "fres
 def _tamano(nombre):
     """Tamaño en g o ml de un nombre ('285 g', '1 l', '3x140 g', '1,5 kg'), o None."""
     t = str(nombre or "").lower().replace(",", ".")
-    m = re.search(r"(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|gr|g|ml|cl|lt|l)\b", t)
+    m = re.search(r"(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|gr|g|ml|cl|lt|l)\b", t) or \
+        re.search(r"(\d+)\s*(?:latas|botellas|briks|unidades|uds?\.?|bolsitas|sobres|tarros|frascos)\s*(?:de\s*)?(\d+(?:\.\d+)?)\s*(kg|gr|g|ml|cl|lt|l)\b", t)
     if m:
         mult, cant, uni = int(m.group(1)), float(m.group(2)), m.group(3)
     else:
@@ -145,7 +158,8 @@ def _perfil(nombre, marca="", venta=None):
     todas = set(raices)
     estado = next((nom for nom, g in _ESTADOS_R.items() if todas & g), None)
     cabeza = next((r for r in raices if r not in _GEN_R), raices[0] if raices else None)
-    return {"head": cabeza, "resto_total": resto_total, "resto": resto_total - de_marca,
+    sin_gen = [r for r in raices if r not in _GEN_R]
+    return {"head": cabeza, "ini": sin_gen[:3], "resto_total": resto_total, "resto": resto_total - de_marca,
             "attrs": {r for r in raices if r in _ATTR_R}, "formatos": {r for r in raices if r in _FORM_R},
             "usos": {i for i, g in enumerate(_USOS_R) if todas & g},
             "estado": estado,
@@ -158,8 +172,16 @@ def _parecido(o, c, estricto):
     """0 si no es una alternativa válida; si lo es, su parecido (0-1). Estricto: mismo tipo, mismos atributos, mismo
     estado (fresco / congelado / conserva) y uso, formato compatible, tamaño entre la mitad y el doble y la mitad de las
     palabras significativas del original. Laxo: tamaño entre un tercio y el triple y una cuarta parte de las palabras."""
-    if not o["head"] or c["head"] != o["head"]:
-        return 0.0                                  # "harina de maíz" no es "maíz dulce"
+    if not o["head"]:
+        return 0.0
+    if c["head"] != o["head"]:
+        ini = c.get("ini") or []                    # "Hojas de espinaca" sí es espinacas; "harina de maíz" no es "maíz dulce"
+        if o["head"] not in ini or not all(r in _FORMA_R for r in ini[:ini.index(o["head"])]):
+            return 0.0
+    if estricto and ((o["resto_total"] & _CALIF_R) - c["resto_total"] - {c["head"]}):
+        return 0.0                                  # aceite de oliva -> vegetal, doble rollo -> rollo normal: solo "menos exacto"
+    if estricto and ((c["resto_total"] & _EXTRAS_R) - o["resto_total"] - {o["head"]}):
+        return 0.0                                  # el candidato lleva chocolate/yogur... y el original no
     if not o["attrs"] <= c["attrs"]:
         return 0.0                                  # un spray no se sustituye por una botella; congelado por fresco, tampoco
     if o["formatos"] and c["formatos"] and not (o["formatos"] & c["formatos"]):
@@ -179,7 +201,7 @@ def _parecido(o, c, estricto):
         lo, hi = (0.5, 2.0) if estricto else (1 / 3, 3.0)
         if not lo <= c["tamano"] / o["tamano"] <= hi:
             return 0.0                              # 1 l o 5 l no sustituyen a 200 ml
-    sim = len(o["resto"] & c["resto_total"]) / len(o["resto"]) if o["resto"] else 1.0
+    sim = len(o["resto"] & (c["resto_total"] | {c["head"]})) / len(o["resto"]) if o["resto"] else 1.0
     if sim < (0.5 if estricto else 0.25):
         return 0.0
     return max(sim, 0.01)

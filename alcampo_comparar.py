@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.12"
+VERSION = "1.13"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -320,6 +320,24 @@ def consultas_de_linea(nombre):
     return list(dict.fromkeys(qs[:1] + qs[-1:])) if qs else []
 
 
+_NO_MARCA = {"variedad", "cubos", "dados", "vainas", "polvo", "carrefour", "extra", "classic", "sensation", "mercado", "pack", "mini", "light", "zero", "natural", "especial"}
+
+
+def consultas_extra(nombre):
+    """Búsquedas cortas de rescate para una línea sin equivalente: la primera palabra, cada palabra con mayúscula que pueda ser
+    marca ('Aperol', 'Babybel') y las dos primeras palabras significativas. Se usan SOLO cuando las normales no encontraron nada."""
+    toks = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", str(nombre or ""))
+    base = set(consultas_de_linea(nombre))
+    qs = []
+    if toks and len(toks[0]) >= 4:
+        qs.append(toks[0].lower())
+    qs += [t.lower() for t in toks[1:] if t[0].isupper() and len(t) >= 4 and t.lower() not in _NO_MARCA]
+    sig = _palabras(nombre, quitar_gamas=True)
+    if len(sig) >= 2:
+        qs.append(" ".join(sig[:2]))
+    return [q for q in dict.fromkeys(qs) if q not in base][:4]
+
+
 def consultas_del_pedido(pedido):
     vistas = []
     for l in pedido.get("lineas") or []:
@@ -452,7 +470,7 @@ def comparar_pedido(pedido, resultados):
             a_peso.append({"nombre": l["nombre"], "carrefour_lista": valor_lista(l)})
             continue
         pool, vistos = [], set()
-        for q in consultas_de_linea(l["nombre"]):
+        for q in consultas_de_linea(l["nombre"]) + consultas_extra(l["nombre"]):
             for c in resultados.get(q) or []:
                 if c.get("sku") not in vistos:
                     vistos.add(c.get("sku"))
@@ -713,7 +731,17 @@ def cmd_consultas(a):
     h, ruta = cargar_historial(a.historial)
     p = elegir_pedido(h, a.pedido)
     qs = consultas_del_pedido(p)
-    if a.faltan:
+    if a.sin_equivalente:
+        res, fich, _, _ = cargar_resultados(a.resultados)
+        if not fich:
+            raise SystemExit("Primero haz el paso normal (consultas -> consola -> comparar): hace falta alcampo_resultados.json.")
+        sin = comparar_pedido(p, res)["sin_equivalente"]
+        qs = [q for q in dict.fromkeys(q for x in sin for q in consultas_extra(x["nombre"])) if q not in res]
+        print(f"{len(sin)} líneas sin equivalente -> {len(qs)} búsquedas nuevas (marca / primera palabra).")
+        if not qs:
+            print("No hay búsquedas nuevas que probar.")
+            return 0
+    elif a.faltan:
         hechas = cargar_resultados(a.resultados)[0]
         total = len(qs)
         qs = [q for q in qs if q not in hechas]
@@ -800,6 +828,7 @@ def main(argv=None):
         elif nombre == "consultas":
             s.add_argument("--consultas", default="alcampo_consultas.json")
             s.add_argument("--script", default="alcampo_exportar_listo.js")
+            s.add_argument("--sin-equivalente", action="store_true", help="solo búsquedas cortas de rescate para las líneas sin equivalente")
             s.add_argument("--faltan", action="store_true", help="solo las búsquedas que aún no están en alcampo_resultados*.json")
             s.add_argument("--resultados", default="alcampo_resultados.json")
         else:

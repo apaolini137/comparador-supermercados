@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.15"
+VERSION = "1.16"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -42,7 +42,9 @@ _GAMAS = {"classic", "extra", "sensation", "essential"}
 
 def _sin_acentos(t):
     t = unicodedata.normalize("NFKD", str(t or "").lower())
-    return "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    # sinónimos de grafía entre Carrefour y Alcampo
+    return re.sub(r"\bcubos?\b|\bcubitos\b", "dados", re.sub(r"biscotte", "biscote", t))
 
 
 def _palabras(nombre, quitar_gamas=False):
@@ -68,7 +70,7 @@ def _raiz(w):
     return n[:-1] if len(n) > 3 and n.endswith("s") else n
 
 
-_SINON_ATTR = {"bio": "ecologico", "ecologica": "ecologico", "vegana": "vegano", "congelada": "congelado",
+_SINON_ATTR = {"ligero": "light", "bio": "ecologico", "ecologica": "ecologico", "vegana": "vegano", "congelada": "congelado",
                "fresca": "fresco"}
 
 
@@ -335,6 +337,7 @@ def consultas_extra(nombre):
     sig = _palabras(nombre, quitar_gamas=True)
     if len(sig) >= 2:
         qs.append(" ".join(sig[:2]))
+    qs.append(re.sub(r"(?i)\bcubos?\b", "dados", " ".join(sig[:2])))      # 'cebolla cubos' -> 'cebolla dados' (así lo llama Alcampo)
     return [q for q in dict.fromkeys(qs) if q not in base][:4]
 
 
@@ -411,7 +414,7 @@ def emparejar(linea, productos):
     tam_o = o["tamano"]
     o_sin = dict(o, tamano=None)
     # marcas probables del original: palabras con mayúscula inicial que no son la primera ('Aperol', 'Babybel', 'Vulpi')
-    marcas_o = {_raiz(t.lower()) for t in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", linea["nombre"])[1:]
+    marcas_o = {_raiz(t.lower()) for t in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", linea["nombre"])
                 if t[0].isupper() and len(t) >= 4 and t.lower() not in _NO_MARCA}
     mejores = []
     for c in productos:
@@ -420,11 +423,23 @@ def emparejar(linea, productos):
         pc = _perfil(limpiar_nombre_alcampo(c["nombre"]), c.get("marca", ""))
         tam_c = tamano_envase(c.get("envase")) or pc["tamano"]
         pc = dict(pc, tamano=None)
+        marcas_c = {_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", str(c.get("marca") or "").lower())}
+        if o["head"] in marcas_c:
+            pc = dict(pc, head=o["head"])                  # la marca va de cabeza en el original ('Fanta de naranja...') y en Alcampo es 'FANTA ... Refresco'
         sim = _parecido(o_sin, pc, True)
         nivel = "estricta" if sim else ("laxa" if _parecido(o_sin, pc, False) else None)
-        solo_marca = False
-        if not nivel and marcas_o & {_raiz(w) for w in re.findall(r"[a-záéíóúüñ]+", str(c.get("marca") or "").lower())}:
-            nivel, solo_marca = "laxa", True               # misma marca aunque el nombre del tipo difiera ('Licor aperitivo Aperol' / 'Aperitivo APEROL')
+        solo = ""
+        if not nivel and marcas_o & marcas_c:
+            nivel, solo = "laxa", " - solo coincide la marca"   # 'Licor aperitivo Aperol' / 'APEROL Licor...'
+        if not nivel:
+            n_o0, n_c0 = unidades(linea["nombre"]), unidades(f"{c['nombre']} {c.get('envase') or ''}")
+            b_o0, b_c0 = (tam_o, tam_c) if tam_o and tam_c else ((n_o0, n_c0) if n_o0 and n_c0 else (None, None))
+            ini = pc.get("ini") or []
+            mismo_tipo = bool(o["head"]) and (pc["head"] == o["head"] or (o["head"] in ini and all(r in _FORMA_R for r in ini[:ini.index(o["head"])])))
+            sin_calif = not ((o["resto_total"] & _CALIF_R) - pc["resto_total"] - {pc["head"]})      # no perder 'semidesnatada', 'oliva', 'doble'...
+            if (mismo_tipo and sin_calif and len(o["resto"]) <= 3 and b_o0 and b_c0 and 0.5 <= b_c0 / b_o0 <= 2.0
+                    and not (o["attrs"] - pc["attrs"])):
+                nivel, solo = "laxa", " - solo coincide tipo y tamaño"
         if not nivel:
             continue
         completo = sim >= 0.999                                        # el candidato contiene todas las palabras del original (misma gama)
@@ -436,10 +451,10 @@ def emparejar(linea, productos):
         en_rango = ratio is not None and (0.5 <= ratio <= 2.0 or any(m >= 2 and abs(f - m) <= 0.03 * m for f in (ratio, 1 / ratio) for m in [round(f)]))
         misma_marca = _marca_en_nombre(c.get("marca", ""), linea["nombre"])
         por_original = c["precio"] / ratio if ratio else c["precio"]  # lo que costaría un envase del tamaño del original
-        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo_marca))
+        mejores.append(((nivel != "estricta", not misma_marca, not en_rango, not completo, por_original), c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo))
     if not mejores:
         return None
-    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo_marca = min(mejores, key=lambda x: x[0])
+    _, c, nivel, misma_marca, comparable, en_rango, base_o, base_c, medida, solo = min(mejores, key=lambda x: x[0])
     q, precio = linea["cantidad"], c["precio"]
     if base_o and base_c:
         coste = round(precio * (q * base_o) / base_c, 2)               # siempre al precio por unidad: 1,5 l no cuesta lo que 1,25 l
@@ -452,8 +467,7 @@ def emparejar(linea, productos):
             formato += " - tamaño muy distinto"
     else:
         coste, formato = round(precio * q, 2), "tamaño sin comprobar"
-    if solo_marca:
-        formato += " - solo coincide la marca"
+    formato += solo
     ahorro, texto_promo = ahorro_promo(c.get("promos"), precio, q) if comparable else (0.0, None)
     return {"alcampo": c, "nivel": nivel, "misma_marca": misma_marca, "formato": formato, "coste": coste, "en_rango": en_rango,
             "coste_con_promo": round(coste - ahorro, 2), "promo_aplicada": texto_promo}

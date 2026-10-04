@@ -22,7 +22,7 @@ import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
-VERSION = "1.19"
+VERSION = "1.20"
 
 
 # ================================================================ motor de emparejamiento (copiado del MCP de Carrefour)
@@ -600,7 +600,8 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
     if sd and abs(sd - base) > 0.05 * sd:
         out.append(f"  (Ojo: el pedido dice {_eur(sd)} sin descuentos; la diferencia suele venir de productos no entregados o sustituidos.)")
     if envio_alcampo is not None:
-        out.append(f"  Alcampo con envío ({_eur(envio_alcampo)}, supuesto que indicaste): {_eur(est + envio_alcampo)}   "
+        origen = "promoción publicada por Alcampo: Madrid, hasta el 31/12/2026" if abs(envio_alcampo - 0.99) < 0.005 else "supuesto que indicaste"
+        out.append(f"  Alcampo con envío ({_eur(envio_alcampo)}, {origen}): {_eur(est + envio_alcampo)}   "
                    f"frente a Carrefour con el envío que pagaste ({_eur(tt.get('envio_pagado') or 0)}): {_eur(base + (tt.get('envio_pagado') or 0))}")
     else:
         out.append("  Envío de Alcampo NO incluido: aún no se conoce (indícalo con --envio-alcampo).")
@@ -611,6 +612,8 @@ def informe(pedido, r, destino=None, fecha_precios=None, envio_alcampo=None):
                 + _texto_promos(f))
     alc = [fila(f) for f in por_dif if f["coste_con_promo"] < f["carrefour_lista"]][:8]
     car = [fila(f) for f in por_dif[::-1] if f["coste_con_promo"] > f["carrefour_lista"]][:8]
+    out += ["", "Condiciones de Alcampo para Madrid (comprobadas en su cesta anónima el 04/10/2026): pedido mínimo 0,01 €, sin recargo por pedido pequeño, "
+            "sin umbral de envío gratis; el coste de envío (0,99 €) sale del banner de la web, no de la cesta."]
     out += ["", "Donde Alcampo sale MÁS barato:"] + (alc or ["  (ninguno)"])
     out += ["", "Donde Carrefour sale MÁS barato:"] + (car or ["  (ninguno)"])
     avisos = [
@@ -974,7 +977,7 @@ def main(argv=None):
         else:
             s.add_argument("--resultados", default="alcampo_resultados.json")
             s.add_argument("--salida", default="comparacion_alcampo.json")
-            s.add_argument("--envio-alcampo", type=float, default=None, help="coste de envío de Alcampo en euros, si lo conoces")
+            s.add_argument("--envio-alcampo", type=float, default=0.99, help="coste de envío de Alcampo en euros (por defecto 0,99: promoción de Madrid hasta el 31/12/2026)")
         s.set_defaults(f=f)
     a = ap.parse_args(argv)
     return a.f(a)
